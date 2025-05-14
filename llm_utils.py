@@ -2,26 +2,29 @@ import os
 import json
 from openai import OpenAI
 from dotenv import load_dotenv
+from pydantic import BaseModel, ValidationError, Field # For data validation
+from typing import List, Optional
 
 # Load environment variables from .env file
 load_dotenv()
 
 # --- Configuration ---
 API_KEY = os.getenv("OPENAI_API_KEY")
-# Default model is gpt-3.5-turbo, matching the Go project's likely default if unspecified
-MODEL_NAME = os.getenv("OPENAI_MODEL_NAME", "o3-mini")
+MODEL_NAME = os.getenv("OPENAI_MODEL_NAME", "o3-mini") # Using your preferred model
 
 if not API_KEY:
     raise ValueError("CRITICAL: OPENAI_API_KEY not found in .env file or environment variables.")
 
-# Initialize OpenAI client
 client = OpenAI(api_key=API_KEY)
+
+# --- Pydantic Models for LLM Response Validation ---
+class LLMAnalysisResponse(BaseModel):
+    summary: str
+    queries: List[str] = Field(default_factory=list) # Default to empty list
 
 # --- Core LLM Interaction ---
 def get_llm_response(prompt_text, system_message="You are a helpful research assistant."):
-    """
-    Sends a prompt to the LLM and returns its text response.
-    """
+    # ... (this function remains the same as before) ...
     print(f"💬 Calling LLM (model: {MODEL_NAME})...")
     try:
         response = client.chat.completions.create(
@@ -30,22 +33,20 @@ def get_llm_response(prompt_text, system_message="You are a helpful research ass
                 {"role": "system", "content": system_message},
                 {"role": "user", "content": prompt_text}
             ],
-            #temperature=0.7,  # A common default for balanced creativity/factuality
-            # response_format={"type": "json_object"}, # Enable if consistently getting valid JSON and model supports it
+            #temperature=0.7,
+            # response_format={"type": "json_object"}, # Consider if 'o3-mini' supports it well
         )
-        # print(f"LLM Raw Response: {response.choices[0].message.content[:200]}...") # For debugging
         return response.choices[0].message.content
     except Exception as e:
         print(f"❌ Error calling OpenAI API: {e}")
         return None
 
 # --- Prompt Generation Functions ---
+# analyze_content_prompt and refine_answer_prompt remain the same as before.
+# Just ensure analyze_content_prompt asks for "summary" and "queries" keys in JSON.
 def analyze_content_prompt(current_query, content_from_url, source_url, research_so_far_context=""):
-    """
-    Generates the prompt for the LLM to analyze scraped web content.
-    This prompt asks the LLM to summarize the content and suggest new search queries.
-    It mirrors the structure and intent of the Go project's `researcherPrompt`.
-    """
+    # ... (same as the version in our last iteration of llm_utils.py) ...
+    # Make sure the example JSON and instructions specify "summary" and "queries"
     context_section = "No prior research context available for this analysis."
     if research_so_far_context:
         context_section = f"""Your current research context based on previous findings is:
@@ -74,10 +75,7 @@ Example JSON format:
 """
 
 def refine_answer_prompt(initial_query, research_findings_context):
-    """
-    Generates the prompt for the LLM to synthesize a final answer from all gathered research.
-    Mirrors the Go project's `refinePrompt`.
-    """
+    # ... (same as the version in our last iteration of llm_utils.py) ...
     return f"""You are an AI research synthesizer.
 Your task is to provide a comprehensive answer to an initial research question based on a collection of summaries from various sources.
 
@@ -92,86 +90,107 @@ Based *only* on the provided collected research summaries, synthesize a comprehe
 Structure your answer clearly. If there are conflicting points in the summaries, acknowledge them if significant. Do not introduce external knowledge.
 """
 
-# --- Response Parsing ---
-def parse_llm_analysis_response(response_text):
+
+# --- Response Parsing with Pydantic Validation ---
+def parse_llm_analysis_response(response_text: Optional[str]):
     """
-    Parses the JSON response from the LLM's content analysis.
-    Expects keys "summary" and "queries" as per `analyze_content_prompt`.
+    Parses the JSON response from the LLM for content analysis using Pydantic.
+    Expects keys "summary" and "queries".
     """
     if not response_text:
         print("⚠️ LLM response was empty, cannot parse.")
         return "", []
+    
+    raw_json_str = response_text
     try:
         # Attempt to strip markdown code block fences if present
         if response_text.strip().startswith("```json"):
-            json_str = response_text.split("```json")[1].split("```")[0].strip()
-        elif response_text.strip().startswith("```"): # More generic ``` stripping
-            json_str = response_text.split("```")[1].strip()
+            raw_json_str = response_text.split("```json")[1].split("```")[0].strip()
+        elif response_text.strip().startswith("```"):
+            raw_json_str = response_text.split("```")[1].strip()
         else:
-            json_str = response_text.strip()
+            raw_json_str = response_text.strip()
 
-        data = json.loads(json_str)
-        summary = data.get("summary", "")
-        new_queries = data.get("queries", []) # Expecting "queries" key as per Go
+        data = json.loads(raw_json_str) # First, ensure it's valid JSON
         
-        if not isinstance(new_queries, list):
-            print(f"⚠️ LLM 'queries' field was not a list, received: {type(new_queries)}. Treating as no new queries.")
-            new_queries = []
-        return summary, new_queries
+        # Validate with Pydantic
+        validated_data = LLMAnalysisResponse(**data)
+        print("✅ LLM response JSON structure validated with Pydantic.")
+        return validated_data.summary, validated_data.queries
+
     except json.JSONDecodeError as e:
-        print(f"❌ Error parsing LLM JSON response: {e}")
+        print(f"❌ LLM response was not valid JSON: {e}")
         print(f"   Raw response snippet: {response_text[:500]}")
-        # Fallback: try to find summary and queries heuristically (less reliable)
-        # This part is optional and can be complex to make robust.
-        # For now, returning empty on parse failure is safer.
-        return "", [] 
+        return "", []
+    except ValidationError as e:
+        print(f"❌ LLM response JSON did not match expected schema (Pydantic validation failed):")
+        for error in e.errors():
+             print(f"   Field: {error['loc']}, Message: {error['msg']}, Type: {error['type']}")
+        print(f"   Raw JSON attempted: {raw_json_str[:500]}")
+        # Attempt to salvage if possible, or return defaults
+        # For example, if only 'summary' is present and 'queries' is missing, Pydantic handles default_factory
+        # If summary is missing, it's a bigger issue. For now, return defaults on validation error.
+        summary_salvaged = ""
+        queries_salvaged = []
+        if isinstance(data, dict): # if json.loads worked but pydantic failed
+            summary_salvaged = data.get("summary", "")
+            queries_salvaged = data.get("queries", [])
+            if not isinstance(queries_salvaged, list): queries_salvaged = []
+            if summary_salvaged or queries_salvaged:
+                 print(f"   Attempting to use salvaged data: summary present = {bool(summary_salvaged)}, queries found = {len(queries_salvaged)}")
+                 return summary_salvaged, queries_salvaged
+        return "", [] # Default on critical Pydantic error and no salvage
     except Exception as e:
         print(f"❌ Unexpected error parsing LLM response: {e}")
         print(f"   Raw response snippet: {response_text[:500]}")
         return "", []
 
+# ... (if __name__ == '__main__': block for testing can be updated to use Pydantic model if needed)
 if __name__ == '__main__':
-    # Example usage for testing this module directly
-    print("--- Testing llm_utils.py ---")
-    
-    # Test analyze_content_prompt
-    test_analyze_prompt = analyze_content_prompt(
-        current_query="What is photosynthesis?",
-        content_from_url="Photosynthesis is a process used by plants, algae and certain bacteria to harness energy from sunlight and turn it into chemical energy.",
-        source_url="http://example.com/photosynthesis",
-        research_so_far_context="Initial findings suggest photosynthesis is related to plants and energy."
-    )
-    print("\nGenerated Analysis Prompt:\n", test_analyze_prompt)
+    print("--- Testing llm_utils.py (with Pydantic) ---")
     
     # Mock LLM response for parsing
-    mock_llm_json_response = """
+    mock_llm_json_response_valid = """
     ```json
     {
-      "summary": "The content states that photosynthesis is a process where plants, algae, and some bacteria convert sunlight into chemical energy.",
-      "queries": ["how do plants store chemical energy from photosynthesis?", "what types of bacteria perform photosynthesis?"]
+      "summary": "The content states that photosynthesis is a process.",
+      "queries": ["how do plants store energy?", "what bacteria perform photosynthesis?"]
     }
     ```
     """
-    summary, queries = parse_llm_analysis_response(mock_llm_json_response)
-    print(f"\nParsed Summary: {summary}")
-    print(f"Parsed Queries: {queries}")
+    mock_llm_json_response_missing_queries = """
+    ```json
+    {
+      "summary": "Summary without queries field."
+    }
+    ```
+    """
+    mock_llm_json_response_invalid_queries_type = """
+    ```json
+    {
+      "summary": "Summary with invalid queries type.",
+      "queries": "this should be a list"
+    }
+    ```
+    """
+    mock_llm_json_response_bad_json = "```json { summary: 'bad json' "
 
-    # Test refine_answer_prompt
-    test_refine_prompt = refine_answer_prompt(
-        initial_query="What are the benefits of exercise?",
-        research_findings_context="Summary 1: Exercise improves cardiovascular health.\n\n---\n\nSummary 2: Regular physical activity can boost mood and reduce stress."
-    )
-    print("\nGenerated Refine Prompt:\n", test_refine_prompt)
-    
-    # To actually call the LLM (requires API key to be set)
-    # if API_KEY:
-    #     print("\nAttempting live LLM call for analysis (mocked content)...")
-    #     live_response = get_llm_response(test_analyze_prompt)
-    #     if live_response:
-    #         summary, queries = parse_llm_analysis_response(live_response)
-    #         print(f"Live Parsed Summary: {summary}")
-    #         print(f"Live Parsed Queries: {queries}")
-    #     else:
-    #         print("Live LLM call failed or returned no response.")
-    # else:
-    #     print("\nSkipping live LLM call test as OPENAI_API_KEY is not set.")
+    print("\nTesting valid response:")
+    summary, queries = parse_llm_analysis_response(mock_llm_json_response_valid)
+    print(f"  Parsed Summary: {summary}")
+    print(f"  Parsed Queries: {queries}")
+
+    print("\nTesting response missing 'queries' (should default to empty list):")
+    summary, queries = parse_llm_analysis_response(mock_llm_json_response_missing_queries)
+    print(f"  Parsed Summary: {summary}")
+    print(f"  Parsed Queries: {queries}") # Should be []
+
+    print("\nTesting response with invalid 'queries' type:")
+    summary, queries = parse_llm_analysis_response(mock_llm_json_response_invalid_queries_type)
+    print(f"  Parsed Summary: {summary}") # Might be salvaged
+    print(f"  Parsed Queries: {queries}") # Should be [] due to salvage or pydantic error
+
+    print("\nTesting bad JSON response:")
+    summary, queries = parse_llm_analysis_response(mock_llm_json_response_bad_json)
+    print(f"  Parsed Summary: {summary}")
+    print(f"  Parsed Queries: {queries}")

@@ -8,3 +8,6 @@ Google
 python-dotenv
 click
 google-api-python-client
+pydantic
+tiktoken
+playwright

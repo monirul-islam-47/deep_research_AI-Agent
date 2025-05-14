@@ -1,0 +1,10 @@
+openai
+requests
+beautifulsoup4
+readability-lxml
+trafilatura
+# duckduckgo_search
+Google
+python-dotenv
+click
+google-api-python-client
